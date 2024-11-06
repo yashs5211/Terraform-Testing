@@ -1,0 +1,83 @@
+# Define variables
+$BaseURL = "https://<your-tenant>.webmethods.io/integration/rest/v1"
+$TargetBaseURL = "https://<target-tenant>.webmethods.io/integration/rest/v1"
+$APIKey = "<your-api-key>"
+$TargetAPIKey = "<target-api-key>"
+$ProjectName = "<project_name>"
+$Headers = @{
+    "Authorization" = "Bearer $APIKey"
+    "Content-Type" = "application/json"
+}
+$TargetHeaders = @{
+    "Authorization" = "Bearer $TargetAPIKey"
+    "Content-Type" = "application/json"
+}
+
+# Function to list all assets within a project
+function List-Assets {
+    $url = "$BaseURL/projects/$ProjectName/assets"
+    $response = Invoke-RestMethod -Uri $url -Method Get -Headers $Headers
+    return $response
+}
+
+# Function to export an individual asset by ID
+function Export-Asset {
+    param (
+        [string]$AssetId,
+        [string]$AssetName
+    )
+    $url = "$BaseURL/assets/$AssetId/export"
+    $outputPath = "$AssetName.zip"
+
+    # Download the exported asset
+    Invoke-RestMethod -Uri $url -Method Get -Headers $Headers -OutFile $outputPath
+    Write-Host "Exported $AssetName successfully."
+    return $outputPath
+}
+
+
+
+
+function Export-ProjectAssets {
+    $assets = List-Assets
+    foreach ($asset in $assets) {
+        $assetId = $asset.id
+        $assetName = $asset.name
+        $assetType = $asset.type
+
+        Write-Host "Exporting $assetType: $assetName"
+        Export-Asset -AssetId $assetId -AssetName $assetName
+    }
+}
+
+# Run the export function
+Export-ProjectAssets
+
+
+# Function to import an asset file to the target tenant
+function Import-Asset {
+    param (
+        [string]$FilePath
+    )
+    $url = "$TargetBaseURL/assets/import"
+    $fileContent = [System.IO.File]::ReadAllBytes($FilePath)
+    $multipartContent = @{
+        file = [System.IO.File]::OpenRead($FilePath)
+    }
+
+    $response = Invoke-RestMethod -Uri $url -Method Post -Headers $TargetHeaders -InFile $FilePath -ContentType "multipart/form-data"
+    Write-Host "Imported $FilePath with response: $response"
+}
+
+# Import all exported assets to the target tenant
+function Import-ProjectAssets {
+    Get-ChildItem -Path . -Filter "*.zip" | ForEach-Object {
+        Write-Host "Importing $($_.Name) to target tenant..."
+        Import-Asset -FilePath $_.FullName
+    }
+}
+
+# Run the import function
+Import-ProjectAssets
+
+
