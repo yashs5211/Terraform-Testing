@@ -122,3 +122,20 @@ stages:
                 # Run the import process
                 Import-ProjectAssets
 
+{
+  "projectName": "SampleProject",
+  "assets": {
+    "flowServices": [
+      { "name": "OrderProcessingService" },
+      { "name": "InventoryUpdateService" }
+    ],
+    "apis": [
+      { "name": "OrderAPI" }
+    ],
+    "referenceData": [
+      { "name": "CurrencyRates" }
+    ]
+  }
+}
+
+
