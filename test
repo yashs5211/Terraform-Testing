@@ -1,83 +1,124 @@
-# Define variables
-$BaseURL = "https://<your-tenant>.webmethods.io/integration/rest/v1"
-$TargetBaseURL = "https://<target-tenant>.webmethods.io/integration/rest/v1"
-$APIKey = "<your-api-key>"
-$TargetAPIKey = "<target-api-key>"
-$ProjectName = "<project_name>"
-$Headers = @{
-    "Authorization" = "Bearer $APIKey"
-    "Content-Type" = "application/json"
-}
-$TargetHeaders = @{
-    "Authorization" = "Bearer $TargetAPIKey"
-    "Content-Type" = "application/json"
-}
+trigger:
+  branches:
+    include:
+      - main
 
-# Function to list all assets within a project
-function List-Assets {
-    $url = "$BaseURL/projects/$ProjectName/assets"
-    $response = Invoke-RestMethod -Uri $url -Method Get -Headers $Headers
-    return $response
-}
+pool:
+  vmImage: 'windows-latest'
 
-# Function to export an individual asset by ID
-function Export-Asset {
-    param (
-        [string]$AssetId,
-        [string]$AssetName
-    )
-    $url = "$BaseURL/assets/$AssetId/export"
-    $outputPath = "$AssetName.zip"
+variables:
+  # Tenant and API details for source (export) and target (import)
+  sourceBaseUrl: 'https://<source-tenant>.webmethods.io/integration/rest/v1'
+  targetBaseUrl: 'https://<target-tenant>.webmethods.io/integration/rest/v1'
+  projectName: '<project_name>'
+  sourceApiKey: $(SourceApiKey)  # Define these secrets in ADO pipeline variables
+  targetApiKey: $(TargetApiKey)
 
-    # Download the exported asset
-    Invoke-RestMethod -Uri $url -Method Get -Headers $Headers -OutFile $outputPath
-    Write-Host "Exported $AssetName successfully."
-    return $outputPath
-}
+stages:
+  - stage: ExportAssets
+    displayName: Export Assets from Source Tenant
+    jobs:
+      - job: Export
+        displayName: Export Project Assets
+        steps:
+          - task: PowerShell@2
+            displayName: "Export Assets from Source Tenant"
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Define API headers for source tenant
+                $headers = @{
+                    "Authorization" = "Bearer $env:sourceApiKey"
+                    "Content-Type" = "application/json"
+                }
 
+                # Function to list assets in the project
+                function List-Assets {
+                    $url = "$env:sourceBaseUrl/projects/$env:projectName/assets"
+                    $response = Invoke-RestMethod -Uri $url -Method Get -Headers $headers
+                    return $response
+                }
 
+                # Function to export each asset individually
+                function Export-Asset {
+                    param (
+                        [string]$AssetId,
+                        [string]$AssetName
+                    )
+                    $url = "$env:sourceBaseUrl/assets/$AssetId/export"
+                    $outputPath = "$AssetName.zip"
+                    
+                    # Download the exported asset to a zip file
+                    Invoke-RestMethod -Uri $url -Method Get -Headers $headers -OutFile $outputPath
+                    Write-Host "Exported $AssetName successfully."
+                }
 
+                # Export all assets in the project
+                function Export-ProjectAssets {
+                    $assets = List-Assets
+                    foreach ($asset in $assets) {
+                        $assetId = $asset.id
+                        $assetName = $asset.name
+                        $assetType = $asset.type
+                        Write-Host "Exporting $assetType: $assetName"
+                        Export-Asset -AssetId $assetId -AssetName $assetName
+                    }
+                }
 
-function Export-ProjectAssets {
-    $assets = List-Assets
-    foreach ($asset in $assets) {
-        $assetId = $asset.id
-        $assetName = $asset.name
-        $assetType = $asset.type
+                # Run the export process
+                Export-ProjectAssets
 
-        Write-Host "Exporting $assetType: $assetName"
-        Export-Asset -AssetId $assetId -AssetName $assetName
-    }
-}
+          # Publish the exported .zip files as a pipeline artifact
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Exported Assets'
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)'
+              artifactName: 'ExportedAssets'
+              publishLocation: 'pipeline'
 
-# Run the export function
-Export-ProjectAssets
+  - stage: ImportAssets
+    displayName: Import Assets to Target Tenant
+    dependsOn: ExportAssets
+    jobs:
+      - job: Import
+        displayName: Import Project Assets
+        steps:
+          - download: current
+            artifact: ExportedAssets
 
+          - task: PowerShell@2
+            displayName: "Import Assets to Target Tenant"
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Define API headers for target tenant
+                $targetHeaders = @{
+                    "Authorization" = "Bearer $env:targetApiKey"
+                    "Content-Type" = "application/json"
+                }
 
-# Function to import an asset file to the target tenant
-function Import-Asset {
-    param (
-        [string]$FilePath
-    )
-    $url = "$TargetBaseURL/assets/import"
-    $fileContent = [System.IO.File]::ReadAllBytes($FilePath)
-    $multipartContent = @{
-        file = [System.IO.File]::OpenRead($FilePath)
-    }
+                # Function to import an asset file
+                function Import-Asset {
+                    param (
+                        [string]$FilePath
+                    )
+                    $url = "$env:targetBaseUrl/assets/import"
+                    $fileContent = [System.IO.File]::ReadAllBytes($FilePath)
+                    
+                    # Upload the file to target tenant
+                    $response = Invoke-RestMethod -Uri $url -Method Post -Headers $targetHeaders -InFile $FilePath -ContentType "multipart/form-data"
+                    Write-Host "Imported $FilePath with response: $response"
+                }
 
-    $response = Invoke-RestMethod -Uri $url -Method Post -Headers $TargetHeaders -InFile $FilePath -ContentType "multipart/form-data"
-    Write-Host "Imported $FilePath with response: $response"
-}
+                # Loop through all .zip files in the downloaded artifact
+                function Import-ProjectAssets {
+                    $files = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/ExportedAssets" -Filter "*.zip"
+                    foreach ($file in $files) {
+                        Write-Host "Importing $($file.Name) to target tenant..."
+                        Import-Asset -FilePath $file.FullName
+                    }
+                }
 
-# Import all exported assets to the target tenant
-function Import-ProjectAssets {
-    Get-ChildItem -Path . -Filter "*.zip" | ForEach-Object {
-        Write-Host "Importing $($_.Name) to target tenant..."
-        Import-Asset -FilePath $_.FullName
-    }
-}
-
-# Run the import function
-Import-ProjectAssets
-
+                # Run the import process
+                Import-ProjectAssets
 
